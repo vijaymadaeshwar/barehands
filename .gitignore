@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 # the ring's live runtime files (see state/README.md)
+  # .enabled is written by the launcher so the supervisor knows the board
+# was asked for; it is per-machine state, not config.
+state/.enabled
 state/state
 state/mood.json
 state/wave.json
