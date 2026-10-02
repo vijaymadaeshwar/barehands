@@ -50,7 +50,10 @@ Your AI drives the ring by writing tiny files into ./state/ :
   state/wave.json  {"samples": [0..1 x 64], "ts": <unix time>}
 Missing files are fine — the ring just idles.
 """
+import errno
 import json
+import socket
+import sys
 import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -383,10 +386,49 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _Server(ThreadingHTTPServer):
+    """Refuses to share the port with another copy.
+
+    http.server.HTTPServer.allow_reuse_address is 1, and on Windows
+    SO_REUSEADDR lets a second live process bind a port that is already in
+    use. A duplicate launch then succeeded instead of failing, leaving two
+    boards on one port with the kernel choosing between them.
+
+    SO_EXCLUSIVEADDRUSE is the Windows option that means what we want: the
+    bind fails if anyone already holds the port. On Unix the default
+    behaviour already refuses a second live bind.
+    """
+
+    # Windows rejects SO_EXCLUSIVEADDRUSE together with SO_REUSEADDR
+    # (WinError 10022), and TCPServer.server_bind() sets the reuse flag
+    # whenever allow_reuse_address is true, which HTTPServer defaults to.
+    # So the reuse flag must be off before the exclusive one goes on.
+    allow_reuse_address = not hasattr(socket, "SO_EXCLUSIVEADDRUSE")
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET,
+                                   socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 if __name__ == "__main__":
     (HERE / "state").mkdir(exist_ok=True)   # the ring's runtime files land here
     port = int(CONFIG.get("port", 8794))
+    try:
+        srv = _Server(("127.0.0.1", port), Handler)
+    except OSError as e:
+        # The board being open in another window is not a failure worth a
+        # traceback; it is the same server, and saying so beats a stack.
+        if e.errno not in (errno.EADDRINUSE, errno.EACCES):
+            raise
+        print(f"barehands: port {port} is already in use.", flush=True)
+        print("  If that is another barehands board, it is already running --"
+              " open the URL it printed.", flush=True)
+        print("  Otherwise close whatever holds it, or set a different"
+              " \"port\" in barehands.json.", flush=True)
+        sys.exit(1)
     print(f"barehands up: http://127.0.0.1:{port}/stage.html", flush=True)
     print("  tracker (camera): open that URL in Chrome", flush=True)
     print("  render (overlay): same URL + ?role=render", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    srv.serve_forever()
